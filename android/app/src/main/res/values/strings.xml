@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Bicicas Navigator</string>
+    <string name="title_activity_main">Bicicas Navigator</string>
+    <string name="package_name">es.castellon.bicicasnavigator</string>
+    <string name="custom_url_scheme">es.castellon.bicicasnavigator</string>
+</resources>
