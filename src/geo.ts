@@ -80,3 +80,10 @@ export function stationFill(station: Station): string {
   if (ratio <= 0.5) return '#C6A227'
   return '#63B01F'
 }
+
+/** Border color for whether a bike can be returned. */
+export function dockBorder(station: Station): string {
+  if (station.docksAvailable <= 0) return '#C44747'
+  if (station.docksAvailable < 5) return '#E08A2C'
+  return '#63B01F'
+}

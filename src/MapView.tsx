@@ -7,7 +7,7 @@ import {
   type Map as MapLibreMap,
 } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { stationFill } from './geo'
+import { dockBorder, stationFill } from './geo'
 import type { LngLat, Place, RouteLeg, Station } from './types'
 
 const STYLE_URL = 'https://tiles.openfreemap.org/styles/positron'
@@ -44,6 +44,8 @@ const emptyCollection = (): FeatureCollection => ({
   type: 'FeatureCollection',
   features: [],
 })
+
+const stationPoint: ['!', ['has', string]] = ['!', ['has', 'point_count']]
 
 export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
   {
@@ -117,7 +119,11 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         type: 'geojson',
         data: emptyCollection(),
         promoteId: 'id',
+        cluster: true,
+        clusterRadius: 64,
+        clusterMaxZoom: 12,
       })
+      map.addImage('station-group', stationGroupIcon(), { pixelRatio: 2 })
 
       map.addLayer({
         id: 'route-walk',
@@ -165,18 +171,24 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         },
       })
       map.addLayer({
+        id: 'station-rings',
+        type: 'circle',
+        source: 'stations',
+        filter: stationPoint,
+        paint: {
+          'circle-radius': ['case', ['boolean', ['feature-state', 'selected'], false], 20, 16],
+          'circle-color': ['get', 'border'],
+        },
+      })
+      map.addLayer({
         id: 'station-circles',
         type: 'circle',
         source: 'stations',
+        filter: stationPoint,
         paint: {
-          'circle-radius': ['case', ['boolean', ['feature-state', 'selected'], false], 18, 14],
+          'circle-radius': ['case', ['boolean', ['feature-state', 'selected'], false], 14, 11],
           'circle-color': ['get', 'color'],
-          'circle-stroke-width': [
-            'case',
-            ['boolean', ['feature-state', 'selected'], false],
-            3,
-            2,
-          ],
+          'circle-stroke-width': 2,
           'circle-stroke-color': '#ffffff',
         },
       })
@@ -184,10 +196,28 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         id: 'station-labels',
         type: 'symbol',
         source: 'stations',
+        filter: stationPoint,
         layout: {
           'text-field': ['to-string', ['get', 'bikes']],
           'text-font': ['Noto Sans Bold'],
           'text-size': 11,
+        },
+        paint: { 'text-color': '#ffffff' },
+      })
+      map.addLayer({
+        id: 'station-groups',
+        type: 'symbol',
+        source: 'stations',
+        filter: ['has', 'point_count'],
+        layout: {
+          'icon-image': 'station-group',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+          'text-field': ['to-string', ['get', 'point_count']],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 15,
+          'text-allow-overlap': true,
+          'text-ignore-placement': true,
         },
         paint: { 'text-color': '#ffffff' },
       })
@@ -204,7 +234,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
             [point.x - pad, point.y - pad],
             [point.x + pad, point.y + pad],
           ],
-          { layers: ['station-circles', 'station-labels'] },
+          { layers: ['station-circles', 'station-rings', 'station-labels'] },
         )
         const id = hits[0]?.properties?.id
         return typeof id === 'string' ? id : null
@@ -238,8 +268,19 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       })
 
       map.on('click', (event) => {
+        const groups = map.queryRenderedFeatures(event.point, { layers: ['station-groups'] })
+        const clusterId = numberProperty(groups[0]?.properties?.cluster_id)
+        const groupGeometry = groups[0]?.geometry
+        if (clusterId !== null && groupGeometry?.type === 'Point') {
+          const [lng, lat] = groupGeometry.coordinates
+          const source = map.getSource('stations') as GeoJSONSource
+          void source.getClusterExpansionZoom(clusterId).then((zoom) => {
+            map.easeTo({ center: [lng, lat], zoom })
+          })
+          return
+        }
         const hits = map.queryRenderedFeatures(event.point, {
-          layers: ['station-circles', 'station-labels'],
+          layers: ['station-circles', 'station-rings', 'station-labels'],
         })
         const stationId = hits[0]?.properties?.id
         if (typeof stationId === 'string') {
@@ -250,7 +291,19 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       map.on('mouseenter', 'station-circles', () => {
         map.getCanvas().style.cursor = 'pointer'
       })
+      map.on('mouseenter', 'station-rings', () => {
+        map.getCanvas().style.cursor = 'pointer'
+      })
+      map.on('mouseenter', 'station-groups', () => {
+        map.getCanvas().style.cursor = 'pointer'
+      })
       map.on('mouseleave', 'station-circles', () => {
+        map.getCanvas().style.cursor = ''
+      })
+      map.on('mouseleave', 'station-rings', () => {
+        map.getCanvas().style.cursor = ''
+      })
+      map.on('mouseleave', 'station-groups', () => {
         map.getCanvas().style.cursor = ''
       })
     })
@@ -398,10 +451,47 @@ function stationsToGeoJSON(stations: Station[]): FeatureCollection {
         id: station.id,
         bikes: station.bikesAvailable,
         color: stationFill(station),
+        border: dockBorder(station),
       },
       geometry: { type: 'Point', coordinates: [station.lng, station.lat] },
     })),
   }
+}
+
+function numberProperty(value: unknown): number | null {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function stationGroupIcon(): ImageData {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) return new ImageData(size, size)
+  roundedSquare(context, 36, 36, 84, 18, '#c8c6c2')
+  roundedSquare(context, 22, 22, 84, 18, '#2b2a29')
+  return context.getImageData(0, 0, size, size)
+}
+
+function roundedSquare(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  side: number,
+  radius: number,
+  color: string,
+) {
+  context.beginPath()
+  context.moveTo(x + radius, y)
+  context.arcTo(x + side, y, x + side, y + side, radius)
+  context.arcTo(x + side, y + side, x, y + side, radius)
+  context.arcTo(x, y + side, x, y, radius)
+  context.arcTo(x, y, x + side, y, radius)
+  context.closePath()
+  context.fillStyle = color
+  context.fill()
 }
 
 function pointFeature(

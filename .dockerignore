@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+android
+ios
+.git
+.github
+.tmp
+*.log
+*.local

@@ -11,6 +11,18 @@ npm install
 npm run dev
 ```
 
+## GitHub Pages
+
+The published site is `https://mammutor.github.io/Bicicas-Navigator/`. In the repository settings, set Pages → Build and deployment → Source to **GitHub Actions**. A push to `main` runs `.github/workflows/pages.yml`, which builds the site with the Dockerfile and publishes it. Pages serves it over HTTPS, which the browser requires before it will install the app.
+
+To produce the same files locally:
+
+```bash
+docker buildx build --target export -o type=local,dest=./site .
+```
+
+The install prompt is available from that HTTPS address, or from localhost after `npm run build` and `npm run preview`. Opening the built files directly will not install.
+
 ## Android and iOS
 
 ```bash

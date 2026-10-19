@@ -1,24 +1,39 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { reverseAddress } from './address'
 import { MapView, type MapHandle } from './MapView'
 import { readFavorites, writeFavorites, type Favorite } from './favorites'
 import { formatDistance, formatDuration, formatUpdated } from './format'
-import { distanceMeters, fold, stationFill } from './geo'
+import { distanceMeters, dockBorder, fold, stationFill } from './geo'
 import { fill, useLocale, valhallaLanguage, type Messages } from './i18n'
 import { clearPositionWatch, readPosition, watchPosition } from './location'
 import { planTrip, TripError } from './routing'
 import { fetchStations } from './stations'
 import type { LngLat, Place, Station, StationFilter, Trip, TripWarning } from './types'
 
+type SheetLevel = 'peek' | 'mid' | 'full'
+
 export default function App() {
   const mapRef = useRef<MapHandle>(null)
   const routeToken = useRef(0)
   const sheetRef = useRef<HTMLElement>(null)
   const peekRef = useRef<HTMLDivElement>(null)
+  const midRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const originRef = useRef<HTMLInputElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
   const holdToken = useRef(0)
-  const drag = useRef({ startY: 0, origin: 0, moved: false, active: false, lastY: 0, suppressClick: false })
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const drag = useRef({
+    startY: 0,
+    origin: 0,
+    moved: false,
+    active: false,
+    lastY: 0,
+    suppressClick: false,
+    mode: 'undecided' as 'undecided' | 'sheet' | 'scroll',
+    pointerId: -1,
+    inBody: false,
+  })
   const [stations, setStations] = useState<Station[]>([])
   const { locale, setLocale, t } = useLocale()
   const [stationsError, setStationsError] = useState<'load' | 'refresh' | null>(null)
@@ -33,14 +48,17 @@ export default function App() {
   const [origin, setOrigin] = useState<Place | null>(null)
   const [destination, setDestination] = useState<Place | null>(null)
   const [userLocation, setUserLocation] = useState<LngLat | null>(null)
-  const [approximate, setApproximate] = useState(false)
   const [locating, setLocating] = useState(false)
   const [locationNote, setLocationNote] = useState<'missing' | 'failed' | null>(null)
   const [trip, setTrip] = useState<Trip | null>(null)
   const [routing, setRouting] = useState(false)
   const [routeError, setRouteError] = useState<string | null>(null)
-  const [open, setOpen] = useState(false)
+  const [level, setLevel] = useState<SheetLevel>('peek')
+  const [editing, setEditing] = useState<'origin' | 'destination' | null>(null)
+  const editingRef = useRef(editing)
+  editingRef.current = editing
   const [peek, setPeek] = useState(180)
+  const [mid, setMid] = useState(180)
   const [dragY, setDragY] = useState<number | null>(null)
 
   useEffect(() => {
@@ -75,14 +93,12 @@ export default function App() {
         const point = await readPosition()
         if (!active) return
         setUserLocation(point)
-        setApproximate(point.approximate)
         setOrigin((current) => current ?? { ...point, label: '', kind: 'location' })
         setLocationNote(null)
         mapRef.current?.flyTo(point, 14)
         watchId = await watchPosition((next) => {
           if (!active) return
           setUserLocation(next)
-          setApproximate(false)
         })
         if (!active && watchId) await clearPositionWatch(watchId)
       } catch {
@@ -98,15 +114,25 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => {
-    const el = peekRef.current
-    if (!el) return
-    const measure = () => setPeek(el.offsetHeight)
+  useLayoutEffect(() => {
+    const peekEl = peekRef.current
+    const midEl = midRef.current
+    const sheetEl = sheetRef.current
+    if (!peekEl || !midEl) return
+    const measure = () => {
+      const limit = sheetEl?.offsetHeight || peekEl.offsetHeight
+      const nextPeek = Math.min(peekEl.offsetHeight, limit)
+      const nextMid = Math.min(midEl.offsetHeight, limit)
+      setPeek((current) => (current === nextPeek ? current : nextPeek))
+      setMid((current) => (current === nextMid ? current : nextMid))
+    }
     measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(el)
+    observer.observe(peekEl)
+    observer.observe(midEl)
+    if (sheetEl) observer.observe(sheetEl)
     return () => observer.disconnect()
-  }, [selection, departure, locale])
+  }, [selection, editing, departure, locale, lookingUp, locationNote, routeError])
 
   useEffect(() => {
     writeFavorites(favorites)
@@ -157,19 +183,34 @@ export default function App() {
     }
   }
 
-  function choosePlace(place: Place) {
+  function choosePlace(place: Place, role: 'origin' | 'destination' = 'destination') {
+    setQuery('')
+    setEditing(null)
+    setTrip(null)
+    setRouteError(null)
+    mapRef.current?.flyTo(place, 16)
+    if (role === 'origin') {
+      setDeparture(place)
+      setOrigin(place)
+      originRef.current?.blur()
+      if (!selection) {
+        setEditing('destination')
+        setLevel('full')
+        requestAnimationFrame(() => searchRef.current?.focus())
+      } else {
+        setLevel('mid')
+      }
+      return
+    }
     setSelection(place)
     setDestination(place)
     setDraftName(matchFavorite(favorites, place)?.name ?? place.label)
-    setQuery('')
-    setTrip(null)
-    setRouteError(null)
-    setOpen(true)
-    mapRef.current?.flyTo(place, 16)
+    setLevel('mid')
+    searchRef.current?.blur()
   }
 
   function chooseStation(station: Station) {
-    choosePlace(placeFromStation(station))
+    choosePlace(placeFromStation(station), editingRef.current === 'origin' ? 'origin' : 'destination')
   }
 
   function selectStation(id: string) {
@@ -178,33 +219,50 @@ export default function App() {
   }
 
   async function holdOnMap(point: LngLat, stationId: string | null) {
+    const role = editingRef.current === 'origin' ? 'origin' : 'destination'
     if (stationId) {
       const station = stations.find((item) => item.id === stationId)
       if (station) {
-        chooseStation(station)
-        requestAnimationFrame(() => nameRef.current?.focus())
+        choosePlace(placeFromStation(station), role)
         return
       }
     }
     const token = ++holdToken.current
-    choosePlace({ ...point, label: '' })
+    const blank = { ...point, label: '' }
+    if (role === 'origin') {
+      setDeparture(blank)
+      setOrigin(blank)
+      setQuery('')
+      setEditing(null)
+      setLevel(selection ? 'mid' : 'peek')
+    } else {
+      choosePlace(blank, 'destination')
+    }
     setLookingUp(true)
     try {
       const address = await reverseAddress(point, valhallaLanguage(locale))
       if (token !== holdToken.current) return
       const place: Place = { ...point, label: address }
-      setSelection(place)
-      setDestination(place)
-      setDraftName(matchFavorite(favorites, place)?.name ?? address)
+      if (role === 'origin') {
+        setDeparture(place)
+        setOrigin(place)
+      } else {
+        setSelection(place)
+        setDestination(place)
+        setDraftName(matchFavorite(favorites, place)?.name ?? address)
+      }
     } catch {
       if (token !== holdToken.current) return
-      setSelection({ ...point, label: t.mapPoint })
-      setDraftName('')
-    } finally {
-      if (token === holdToken.current) {
-        setLookingUp(false)
-        requestAnimationFrame(() => nameRef.current?.focus())
+      const place = { ...point, label: t.mapPoint }
+      if (role === 'origin') {
+        setDeparture(place)
+        setOrigin(place)
+      } else {
+        setSelection(place)
+        setDraftName('')
       }
+    } finally {
+      if (token === holdToken.current) setLookingUp(false)
     }
   }
 
@@ -214,6 +272,8 @@ export default function App() {
     setTrip(null)
     setRouteError(null)
     setQuery('')
+    setEditing(null)
+    setLevel('peek')
   }
 
   function leaveFromHere() {
@@ -225,7 +285,8 @@ export default function App() {
     setTrip(null)
     setRouteError(null)
     setQuery('')
-    setOpen(true)
+    setEditing('destination')
+    setLevel('full')
     requestAnimationFrame(() => searchRef.current?.focus())
   }
 
@@ -281,7 +342,7 @@ export default function App() {
       const next = await planTrip(spoken(from), spoken(to), stations, valhallaLanguage(locale))
       if (token !== routeToken.current) return
       setTrip(next)
-      setOpen(true)
+      setLevel('full')
     } catch (error) {
       if (token !== routeToken.current) return
       setTrip(null)
@@ -315,7 +376,6 @@ export default function App() {
           const fix = await readPosition()
           point = fix
           setUserLocation(fix)
-          setApproximate(fix.approximate)
           setLocationNote(null)
         } catch {
           setLocationNote('failed')
@@ -337,64 +397,181 @@ export default function App() {
     try {
       const point = await readPosition()
       setUserLocation(point)
-      setApproximate(point.approximate)
       setOrigin({ ...point, label: '', kind: 'location' })
       setLocationNote(null)
       mapRef.current?.flyTo(point, 15)
     } catch {
       setLocationNote('failed')
-      setOpen(true)
+      setLevel('full')
     } finally {
       setLocating(false)
     }
   }
 
-  function sheetTravel() {
+  function originText() {
+    if (departure) return placeLabel(departure, t.yourLocation)
+    if (userLocation) return t.yourLocation
+    return ''
+  }
+
+  function swapEnds() {
+    const start = departure
+    const end = selection
+    setTrip(null)
+    setRouteError(null)
+    setQuery('')
+    setEditing(null)
+    if (end && start) {
+      setDeparture(end)
+      setOrigin(end)
+      setSelection(start)
+      setDestination(start)
+      setDraftName(matchFavorite(favorites, start)?.name ?? start.label)
+      setLevel('mid')
+      return
+    }
+    if (end) {
+      setDeparture(end)
+      setOrigin(end)
+      setSelection(null)
+      setDestination(null)
+      setEditing('destination')
+      setLevel('full')
+      requestAnimationFrame(() => searchRef.current?.focus())
+      return
+    }
+    if (start) {
+      setSelection(start)
+      setDestination(start)
+      setDraftName(matchFavorite(favorites, start)?.name ?? start.label)
+      setDeparture(null)
+      setOrigin(userLocation ? { ...userLocation, label: '', kind: 'location' } : null)
+      setLevel('mid')
+    }
+  }
+
+  function clearDeparture() {
+    setDeparture(null)
+    setTrip(null)
+    setOrigin(userLocation ? { ...userLocation, label: '', kind: 'location' } : null)
+  }
+
+  function sheetOffset(which: SheetLevel) {
     const height = sheetRef.current?.offsetHeight ?? 0
-    return Math.max(0, height - peek)
+    if (which === 'full') return 0
+    const shown = which === 'mid' ? mid : peek
+    return Math.max(0, height - shown)
   }
 
-  function onPeekDown(event: PointerEvent<HTMLDivElement>) {
-    const target = event.target as HTMLElement
-    if (target.closest('input, a, .btn, .lang, .icon-btn, .chip, .results')) return
-    drag.current = {
-      startY: event.clientY,
-      origin: open ? 0 : sheetTravel(),
-      moved: false,
-      active: true,
-      lastY: event.clientY,
-      suppressClick: false,
-    }
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId)
-    } catch {
-      // The pointer is still tracked from pointer move events on the sheet.
-    }
+  function snapPoints() {
+    const points: { level: SheetLevel; y: number }[] = [
+      { level: 'full', y: 0 },
+      { level: 'peek', y: sheetOffset('peek') },
+    ]
+    const midY = sheetOffset('mid')
+    if (selection && midY < points[1].y - 24) points.splice(1, 0, { level: 'mid', y: midY })
+    return points
   }
 
-  function onPeekMove(event: PointerEvent<HTMLDivElement>) {
-    if (!drag.current.active) return
-    drag.current.lastY = event.clientY
-    const delta = event.clientY - drag.current.startY
-    if (Math.abs(delta) > 4) drag.current.moved = true
-    const next = Math.min(sheetTravel(), Math.max(0, drag.current.origin + delta))
+  function onSheetDown(event: PointerEvent<HTMLElement>) {
+    const gesture = drag.current
+    gesture.startY = event.clientY
+    gesture.origin = dragY ?? sheetOffset(level)
+    gesture.moved = false
+    gesture.active = true
+    gesture.lastY = event.clientY
+    gesture.mode = 'undecided'
+    gesture.pointerId = event.pointerId
+    gesture.inBody = !!bodyRef.current?.contains(event.target as Node)
+  }
+
+  function onSheetMove(event: PointerEvent<HTMLElement>) {
+    const gesture = drag.current
+    if (!gesture.active || event.pointerId !== gesture.pointerId) return
+    const delta = event.clientY - gesture.startY
+    const step = event.clientY - gesture.lastY
+    gesture.lastY = event.clientY
+    const body = bodyRef.current
+    if (gesture.mode === 'undecided') {
+      if (Math.abs(delta) < 8) return
+      const overflowing = !!body && body.scrollHeight > body.clientHeight + 1
+      const atTop = !body || body.scrollTop <= 0
+      gesture.mode =
+        level === 'full' && overflowing && gesture.inBody && (delta < 0 || !atTop) ? 'scroll' : 'sheet'
+      gesture.moved = true
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      } catch {
+        // Pointer moves still bubble from the element that received the touch.
+      }
+      if (gesture.mode === 'sheet') {
+        const focused = document.activeElement
+        if (focused instanceof HTMLElement && sheetRef.current?.contains(focused)) focused.blur()
+      } else if (body) {
+        body.scrollTop -= delta
+        return
+      }
+    }
+
+    if (gesture.mode === 'scroll' && body) {
+      body.scrollTop -= step
+      if (body.scrollTop <= 0 && step > 0) {
+        body.scrollTop = 0
+        gesture.mode = 'sheet'
+        gesture.startY = event.clientY
+        gesture.origin = 0
+      } else {
+        return
+      }
+    }
+
+    const next = Math.min(sheetOffset('peek'), Math.max(0, gesture.origin + (event.clientY - gesture.startY)))
     setDragY(next)
   }
 
-  function onPeekUp() {
-    if (!drag.current.active) return
-    const delta = drag.current.lastY - drag.current.startY
-    const current = Math.min(sheetTravel(), Math.max(0, drag.current.origin + delta))
-    const moved = drag.current.moved
-    drag.current.active = false
-    drag.current.moved = false
+  function onSheetUp(event: PointerEvent<HTMLElement>) {
+    const gesture = drag.current
+    if (!gesture.active || event.pointerId !== gesture.pointerId) return
+    gesture.lastY = event.clientY
+    const delta = gesture.lastY - gesture.startY
+    if (gesture.mode === 'undecided' && Math.abs(delta) >= 8) {
+      const body = bodyRef.current
+      const overflowing = !!body && body.scrollHeight > body.clientHeight + 1
+      const atTop = !body || body.scrollTop <= 0
+      gesture.mode =
+        level === 'full' && overflowing && gesture.inBody && (delta < 0 || !atTop) ? 'scroll' : 'sheet'
+      gesture.moved = gesture.mode === 'sheet'
+      if (gesture.mode === 'scroll' && body) body.scrollTop -= delta
+    }
+    const current = Math.min(sheetOffset('peek'), Math.max(0, gesture.origin + delta))
+    const moved = gesture.moved && gesture.mode === 'sheet'
+    gesture.active = false
+    gesture.mode = 'undecided'
     setDragY(null)
     if (!moved) return
-    drag.current.suppressClick = true
+    gesture.suppressClick = true
     window.setTimeout(() => {
-      drag.current.suppressClick = false
+      gesture.suppressClick = false
     }, 400)
-    setOpen(current < sheetTravel() / 2)
+    const points = snapPoints()
+    if (delta < -36) {
+      const next = points.filter((point) => point.y < current - 12).sort((a, b) => b.y - a.y)[0]
+      if (next) {
+        setLevel(next.level)
+        return
+      }
+    }
+    if (delta > 36) {
+      const next = points.filter((point) => point.y > current + 12).sort((a, b) => a.y - b.y)[0]
+      if (next) {
+        setLevel(next.level)
+        return
+      }
+    }
+    const nearest = points.reduce((best, point) =>
+      Math.abs(point.y - current) < Math.abs(best.y - current) ? point : best,
+    )
+    setLevel(nearest.level)
   }
 
   function onHandleClick() {
@@ -402,7 +579,11 @@ export default function App() {
       drag.current.suppressClick = false
       return
     }
-    setOpen((value) => !value)
+    setLevel((current) => {
+      if (current === 'full') return selection ? 'mid' : 'peek'
+      if (current === 'mid') return 'full'
+      return selection ? 'mid' : 'full'
+    })
   }
 
   const totals = trip
@@ -416,7 +597,7 @@ export default function App() {
     : null
 
   return (
-    <div className="shell" style={{ ['--peek' as string]: `${peek}px` }}>
+    <div className="shell" style={{ ['--peek' as string]: `${peek}px`, ['--mid' as string]: `${mid}px` }}>
       <MapView
         ref={mapRef}
         stations={visibleStations}
@@ -440,79 +621,177 @@ export default function App() {
       </button>
 
       <section
-        className={open ? 'sheet open' : 'sheet'}
+        className={`sheet ${level}`}
         ref={sheetRef}
         style={dragY === null ? undefined : { transform: `translateY(${dragY}px)`, transition: 'none' }}
+        onPointerDown={onSheetDown}
+        onPointerMove={onSheetMove}
+        onPointerUp={onSheetUp}
+        onPointerCancel={onSheetUp}
+        onClickCapture={(event) => {
+          if (!drag.current.suppressClick) return
+          event.preventDefault()
+          event.stopPropagation()
+          drag.current.suppressClick = false
+        }}
       >
-        <div
-          className="sheet-peek"
-          ref={peekRef}
-          onPointerDown={onPeekDown}
-          onPointerMove={onPeekMove}
-          onPointerUp={onPeekUp}
-          onPointerCancel={onPeekUp}
-        >
-          <button className="handle-hit" type="button" aria-label={t.moreInfo} onClick={onHandleClick}>
-            <span className="handle" />
-          </button>
-          {departure && (
-            <div className="from-chip">
-              <span>{t.from}</span>
-              <strong>{placeLabel(departure, t.myLocation)}</strong>
-              <button
-                type="button"
-                onClick={() => {
-                  setDeparture(null)
-                  setTrip(null)
-                  setOrigin(userLocation ? { ...userLocation, label: '', kind: 'location' } : null)
-                }}
-                aria-label={t.clearFrom}
-              >
-                ×
+        <div className="sheet-mid" ref={midRef}>
+          <div className="sheet-peek" ref={peekRef}>
+            <button className="handle-hit" type="button" aria-label={t.moreInfo} onClick={onHandleClick}>
+              <span className="handle" />
+            </button>
+            <div className="planner">
+              <div className="planner-rail" aria-hidden="true">
+                <span className="planner-circle" />
+                <span className="planner-dots" />
+                <svg className="planner-pin" viewBox="0 0 24 24">
+                  <path d="M12 22s7-7.2 7-12a7 7 0 1 0-14 0c0 4.8 7 12 7 12z" />
+                  <circle cx="12" cy="10" r="2.5" fill="#fff" />
+                </svg>
+              </div>
+              <div className="planner-fields">
+                <label className={editing === 'origin' ? 'planner-field focused' : 'planner-field'}>
+                  <span className="sr-only">{t.startPlaceholder}</span>
+                  <input
+                    ref={originRef}
+                    value={editing === 'origin' ? query : originText()}
+                    placeholder={lookingUp && editing === 'origin' ? t.findingAddress : t.startPlaceholder}
+                    readOnly={editing !== 'origin'}
+                    onFocus={() => {
+                      if (editing === 'origin') return
+                      setEditing('origin')
+                      setQuery('')
+                      setLevel('full')
+                    }}
+                    onChange={(event) => {
+                      setQuery(event.target.value)
+                      setEditing('origin')
+                      setLevel('full')
+                    }}
+                    onBlur={() => {
+                      if (editing !== 'origin') return
+                      setQuery('')
+                      setEditing(null)
+                      setLevel((current) => (selection && current === 'full' ? 'mid' : current))
+                    }}
+                  />
+                  {departure && editing !== 'origin' && (
+                    <button
+                      className="search-clear"
+                      type="button"
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={clearDeparture}
+                      aria-label={t.clearFrom}
+                    >
+                      ×
+                    </button>
+                  )}
+                  <button
+                    className="planner-search"
+                    type="button"
+                    aria-label={t.search}
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={() => originRef.current?.focus()}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="11" cy="11" r="6.25" fill="none" stroke="currentColor" strokeWidth="2" />
+                      <path d="M16 16.5L20 20.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                </label>
+                <label className={editing === 'destination' ? 'planner-field focused' : 'planner-field'}>
+                  <span className="sr-only">{t.destinationPlaceholder}</span>
+                  <input
+                    ref={searchRef}
+                    value={editing === 'destination' ? query : selection?.label ?? ''}
+                    placeholder={
+                      lookingUp && selection && !selection.label ? t.findingAddress : t.destinationPlaceholder
+                    }
+                    readOnly={editing !== 'destination'}
+                    onFocus={() => {
+                      if (editing === 'destination') return
+                      setEditing('destination')
+                      setQuery(selection?.label ?? '')
+                      setLevel('full')
+                      if (selection?.label) requestAnimationFrame(() => searchRef.current?.select())
+                    }}
+                    onChange={(event) => {
+                      const next = event.target.value
+                      setQuery(next)
+                      setEditing('destination')
+                      setLevel('full')
+                      if (selection && next !== selection.label) {
+                        setSelection(null)
+                        setDestination(null)
+                        setTrip(null)
+                        setRouteError(null)
+                      }
+                    }}
+                    onBlur={() => {
+                      if (editing !== 'destination') return
+                      if (!selection || query === '' || query === selection.label) {
+                        setQuery('')
+                        setEditing(null)
+                        setLevel((current) => (selection && current === 'full' ? 'mid' : current))
+                      }
+                    }}
+                  />
+                  {selection && !editing && (
+                    <button
+                      className="search-clear"
+                      type="button"
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={clearSelection}
+                      aria-label={t.cancel}
+                    >
+                      ×
+                    </button>
+                  )}
+                </label>
+              </div>
+              <button className="planner-swap" type="button" onClick={swapEnds} aria-label={t.swap}>
+                <svg viewBox="0 0 24 28" aria-hidden="true">
+                  <path d="M7 13V5M7 5L3.5 8.5M7 5l3.5 3.5M17 15v8M17 23l-3.5-3.5M17 23l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               </button>
             </div>
+            {selection && !editing && (
+              <>
+                {routeError && <p className="error">{routeError}</p>}
+                {locationNote === 'failed' && <p className="error">{t.locationFailed}</p>}
+                <div className="start-actions">
+                  <button className="btn" type="button" disabled={routing} onClick={() => void startTrip()}>
+                    {routing ? t.calculating : t.start}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          {selection && !editing && !selected && (
+            <article className="station">
+              <h2>{lookingUp ? t.findingAddress : selection.label || t.mapPoint}</h2>
+            </article>
           )}
-          <label className="search">
-            <span className="sr-only">{departure && !selection ? t.whereTo : t.search}</span>
-            <input
-              ref={searchRef}
-              value={query}
-              placeholder={departure && !selection ? t.whereTo : t.search}
-              onChange={(event) => {
-                setQuery(event.target.value)
-                setOpen(true)
-              }}
-              onFocus={() => setOpen(true)}
-            />
-          </label>
-          {selection && (
-            <div className="start-row">
-              <div>
-                <strong>{selection.label}</strong>
-                <span>
-                  {departure
-                    ? `${t.from} ${placeLabel(departure, t.myLocation)}`
-                    : approximate
-                      ? t.approximate
-                      : t.fromYou}
-                </span>
+
+          {selected && !editing && (
+            <article className="station">
+              <div className="station-head">
+                {selected.number && <span className="badge">{selected.number}</span>}
+                <div>
+                  <h2>{selection?.label || selected.title}</h2>
+                  <p>
+                    {selected.online ? t.online : t.offline} · {formatUpdated(selected.lastSeen, t.updated, t.noUpdate)}
+                  </p>
+                </div>
               </div>
-              <button className="icon-btn" type="button" onClick={clearSelection} aria-label={t.cancel}>
-                ×
-              </button>
-              <div className="start-actions">
-                <button className="btn secondary" type="button" onClick={leaveFromHere}>
-                  {t.leaveHere}
-                </button>
-                <button className="btn" type="button" disabled={routing} onClick={() => void startTrip()}>
-                  {routing ? t.calculating : t.start}
-                </button>
-              </div>
-            </div>
+              <Meter label={t.bikes} value={selected.bikesAvailable} total={selected.capacity} />
+              <Meter label={t.docks} value={selected.docksAvailable} total={selected.capacity} />
+            </article>
           )}
         </div>
 
-        <div className="sheet-body">
+        <div className="sheet-body" ref={bodyRef}>
           <div className="brand-row">
             <div className="brand">
               bici<span>Cas</span>
@@ -552,10 +831,9 @@ export default function App() {
               </button>
             </div>
           </div>
-          {locationNote && (
-            <p className="muted peek-note">
-              {locationNote === 'missing' ? t.noLocation : t.locationFailed}
-            </p>
+          {locationNote === 'missing' && <p className="muted peek-note">{t.noLocation}</p>}
+          {locationNote === 'failed' && !(selection && !editing) && (
+            <p className="muted peek-note">{t.locationFailed}</p>
           )}
           <div className="filters">
             <FilterChip active={filter === 'all'} onClick={() => setFilter('all')}>
@@ -569,26 +847,10 @@ export default function App() {
             </FilterChip>
           </div>
 
-          {selection && !selected && (
-            <article className="station">
-              <h2>{lookingUp ? t.findingAddress : selection.label || t.mapPoint}</h2>
-            </article>
-          )}
-
-          {selected && (
-            <article className="station">
-              <div className="station-head">
-                {selected.number && <span className="badge">{selected.number}</span>}
-                <div>
-                  <h2>{selection?.label || selected.title}</h2>
-                  <p>
-                    {selected.online ? t.online : t.offline} · {formatUpdated(selected.lastSeen, t.updated, t.noUpdate)}
-                  </p>
-                </div>
-              </div>
-              <Meter label={t.bikes} value={selected.bikesAvailable} total={selected.capacity} />
-              <Meter label={t.docks} value={selected.docksAvailable} total={selected.capacity} />
-            </article>
+          {selection && !editing && (
+            <button className="btn secondary leave-wide" type="button" onClick={leaveFromHere}>
+              {t.leaveHere}
+            </button>
           )}
 
           {selection && (
@@ -622,7 +884,7 @@ export default function App() {
             <p className="error">{stationsError === 'load' ? t.loadError : t.refreshError}</p>
           )}
 
-          {routeError && <p className="error">{routeError}</p>}
+          {routeError && !(selection && !editing) && <p className="error">{routeError}</p>}
 
           {trip && totals && (
             <div className="trip">
@@ -675,6 +937,7 @@ export default function App() {
                     <li key={favorite.id}>
                       <button
                         type="button"
+                        onPointerDown={(event) => event.preventDefault()}
                         onClick={() =>
                           choosePlace({
                             lng: favorite.lng,
@@ -712,8 +975,17 @@ export default function App() {
             <ul className="results">
               {listed.map((station) => (
                 <li key={station.id}>
-                  <button type="button" onClick={() => chooseStation(station)}>
-                    <i style={{ background: stationFill(station) }} />
+                  <button
+                    type="button"
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={() => chooseStation(station)}
+                  >
+                    <i
+                      style={{
+                        background: stationFill(station),
+                        boxShadow: `0 0 0 2px ${dockBorder(station)}`,
+                      }}
+                    />
                     <span>
                       <strong>{station.title}</strong>
                       <em>
