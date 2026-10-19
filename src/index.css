@@ -130,7 +130,7 @@ button, input { font: inherit; }
 .search input:focus { box-shadow: inset 0 0 0 2px #63b01f; }
 
 .results, .empty-search {
-  margin: 0;
+  margin: 0 0 14px;
   padding: 4px;
   list-style: none;
   background: #f8f8f8;
@@ -364,6 +364,30 @@ button, input { font: inherit; }
 
 .planner-field input::placeholder { color: #8d8d8d; }
 
+.search-spin {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 2px solid #d7d7d7;
+  border-top-color: #1c8794;
+  border-radius: 99px;
+  animation: search-spin 0.7s linear infinite;
+}
+
+.search-pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@keyframes search-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-spin { animation: none; border-top-color: #1c8794; }
+}
+
 .planner-search,
 .planner-swap {
   border: 0;
@@ -421,6 +445,26 @@ button, input { font: inherit; }
 
 .save-row input:focus { box-shadow: inset 0 0 0 2px #63b01f; }
 .save-row .btn { flex: none; }
+
+.results i.addr-mark {
+  background: #2b2a29;
+}
+
+.results i.loc-mark {
+  background: #2b2a29;
+  position: relative;
+}
+
+.results i.loc-mark::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: #63b01f;
+}
 
 .results i.fav-mark {
   background: #63b01f;

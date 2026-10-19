@@ -2,7 +2,7 @@
 
 Navigation for the Bicicas stations in Castelló de la Plana. One web codebase runs in the browser and, through Capacitor, on Android and iOS.
 
-The map is [MapLibre](https://maplibre.org/) with the OpenFreeMap Positron style (OpenStreetMap). Station occupancy comes from the feed used by the map on [dev.bicicas.es](https://dev.bicicas.es/mapa): `https://ws2.bicicas.es/bench_status_map`. Routes use the public [Valhalla](https://valhalla.github.io/valhalla/) server: walking from the start to a station with bikes, cycling between stations, then walking to the destination.
+The map is [MapLibre](https://maplibre.org/) with the OpenFreeMap Positron style (OpenStreetMap). Station occupancy comes from the feed used by the map on [dev.bicicas.es](https://dev.bicicas.es/mapa): `https://ws2.bicicas.es/bench_status_map`. Routes use the public [Valhalla](https://valhalla.github.io/valhalla/) server: walking from the start to a station with bikes, cycling between stations, then walking to the destination. Address search uses the public [Photon](https://photon.komoot.io/) geocoder (Apache-2.0), biased to Castelló de la Plana.
 
 ## Develop
 

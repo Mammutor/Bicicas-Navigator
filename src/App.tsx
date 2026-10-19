@@ -6,6 +6,7 @@ import { formatDistance, formatDuration, formatUpdated } from './format'
 import { distanceMeters, dockBorder, fold, stationFill } from './geo'
 import { fill, useLocale, valhallaLanguage, type Messages } from './i18n'
 import { clearPositionWatch, readPosition, watchPosition } from './location'
+import { formatAddress, searchAddresses, type AddressHit } from './photon'
 import { planTrip, TripError } from './routing'
 import { fetchStations } from './stations'
 import type { LngLat, Place, Station, StationFilter, Trip, TripWarning } from './types'
@@ -39,6 +40,10 @@ export default function App() {
   const [stationsError, setStationsError] = useState<'load' | 'refresh' | null>(null)
   const [loadingStations, setLoadingStations] = useState(true)
   const [query, setQuery] = useState('')
+  const [addresses, setAddresses] = useState<AddressHit[]>([])
+  const [searchingAddresses, setSearchingAddresses] = useState(false)
+  const [addressQuery, setAddressQuery] = useState('')
+  const biasRef = useRef<LngLat | null>(null)
   const [filter, setFilter] = useState<StationFilter>('all')
   const [selection, setSelection] = useState<Place | null>(null)
   const [departure, setDeparture] = useState<Place | null>(null)
@@ -138,6 +143,44 @@ export default function App() {
     writeFavorites(favorites)
   }, [favorites])
 
+  biasRef.current = userLocation
+
+  const addressSearch =
+    editing !== null &&
+    query.trim().length >= 2 &&
+    !(editing === 'destination' && selection?.label === query.trim())
+
+  useEffect(() => {
+    const text = query.trim()
+    if (!addressSearch) {
+      setAddresses([])
+      setSearchingAddresses(false)
+      setAddressQuery('')
+      return
+    }
+    const controller = new AbortController()
+    setSearchingAddresses(true)
+    const timer = window.setTimeout(() => {
+      void searchAddresses(text, locale, biasRef.current, controller.signal)
+        .then((hits) => {
+          if (controller.signal.aborted) return
+          setAddresses(hits)
+          setAddressQuery(text)
+          setSearchingAddresses(false)
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          setAddresses([])
+          setAddressQuery(text)
+          setSearchingAddresses(false)
+        })
+    }, 350)
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [addressSearch, query, locale])
+
   const selectedId = selection?.stationId ?? null
 
   const visibleStations = useMemo(
@@ -211,6 +254,26 @@ export default function App() {
 
   function chooseStation(station: Station) {
     choosePlace(placeFromStation(station), editingRef.current === 'origin' ? 'origin' : 'destination')
+  }
+
+  async function chooseHere() {
+    const role = editingRef.current === 'origin' ? 'origin' : 'destination'
+    let point = userLocation
+    if (!point) {
+      setLocating(true)
+      try {
+        point = await readPosition()
+        setUserLocation(point)
+        setLocationNote(null)
+      } catch {
+        setLocationNote('failed')
+        setLevel('full')
+        return
+      } finally {
+        setLocating(false)
+      }
+    }
+    choosePlace({ ...point, label: t.yourLocation, kind: 'location' }, role)
   }
 
   function selectStation(id: string) {
@@ -325,7 +388,7 @@ export default function App() {
 
   function placeLabel(place: Place | null, empty: string) {
     if (!place) return empty
-    if (place.kind === 'location') return t.myLocation
+    if (place.kind === 'location') return place.label || t.yourLocation
     if (place.kind === 'map') return t.mapPoint
     return place.label
   }
@@ -675,6 +738,9 @@ export default function App() {
                       setLevel((current) => (selection && current === 'full' ? 'mid' : current))
                     }}
                   />
+                  {searchingAddresses && editing === 'origin' && (
+                    <span className="search-spin" role="status" aria-label={t.findingAddress} />
+                  )}
                   {departure && editing !== 'origin' && (
                     <button
                       className="search-clear"
@@ -736,6 +802,9 @@ export default function App() {
                       }
                     }}
                   />
+                  {searchingAddresses && editing === 'destination' && (
+                    <span className="search-spin" role="status" aria-label={t.findingAddress} />
+                  )}
                   {selection && !editing && (
                     <button
                       className="search-clear"
@@ -966,12 +1035,101 @@ export default function App() {
             </>
           )}
 
-          {query.trim() && listed.length === 0 && matchedFavorites.length === 0 && (
-            <p className="empty-search">{t.noResults}</p>
+          {editing && searchingAddresses && addresses.length === 0 && (
+            <p className="empty-search search-pending">
+              <span className="search-spin" aria-hidden="true" />
+              {t.findingAddress}
+            </p>
           )}
-          {listed.length > 0 && (
+
+          {editing && addresses.length > 0 && (
             <>
-          <h3 className="list-title">{query.trim() ? t.search : t.nearby}</h3>
+              <h3 className="list-title">{t.addresses}</h3>
+              <ul className="results">
+                {addresses.map((address) => {
+                  const formatted = formatAddress(address, locale)
+                  const distance = userLocation
+                    ? formatDistance(distanceMeters(userLocation, address) / 1000, locale)
+                    : ''
+                  const detail = [formatted.detail, distance].filter(Boolean).join(' · ')
+                  return (
+                    <li key={address.id}>
+                      <button
+                        type="button"
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() =>
+                          choosePlace(
+                            { lng: address.lng, lat: address.lat, label: formatted.title },
+                            editingRef.current === 'origin' ? 'origin' : 'destination',
+                          )
+                        }
+                      >
+                        <i className="addr-mark" />
+                        <span>
+                          <strong>{formatted.title}</strong>
+                          {detail && <em>{detail}</em>}
+                        </span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
+          )}
+
+          {query.trim().length >= 2 &&
+            addressQuery === query.trim() &&
+            listed.length === 0 &&
+            matchedFavorites.length === 0 &&
+            addresses.length === 0 &&
+            !searchingAddresses && <p className="empty-search">{t.noResults}</p>}
+          {!query.trim() && (
+            <>
+              <h3 className="list-title">{t.nearby}</h3>
+              <ul className="results">
+                <li>
+                  <button
+                    type="button"
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={() => void chooseHere()}
+                  >
+                    <i className="loc-mark" />
+                    <span>
+                      <strong>{t.yourLocation}</strong>
+                    </span>
+                  </button>
+                </li>
+                {listed.map((station) => (
+                  <li key={station.id}>
+                    <button
+                      type="button"
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => chooseStation(station)}
+                    >
+                      <i
+                        style={{
+                          background: stationFill(station),
+                          boxShadow: `0 0 0 2px ${dockBorder(station)}`,
+                        }}
+                      />
+                      <span>
+                        <strong>{station.title}</strong>
+                        <em>
+                          {station.bikesAvailable} {t.bikesShort} · {station.docksAvailable} {t.docksShort}
+                          {userLocation
+                            ? ` · ${formatDistance(distanceMeters(userLocation, station) / 1000, locale)}`
+                            : ''}
+                        </em>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {query.trim() && listed.length > 0 && (
+            <>
+          <h3 className="list-title">{t.search}</h3>
             <ul className="results">
               {listed.map((station) => (
                 <li key={station.id}>

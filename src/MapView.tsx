@@ -227,6 +227,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       let holdTimer = 0
       let lastHold = 0
       const cancelHold = () => window.clearTimeout(holdTimer)
+      const releaseHold = () => {
+        cancelHold()
+      }
       const stationAt = (point: { x: number; y: number }) => {
         const pad = 18
         const hits = map.queryRenderedFeatures(
@@ -240,6 +243,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         return typeof id === 'string' ? id : null
       }
       const emitHold = (lng: number, lat: number, stationId: string | null) => {
+        if (map.isZooming() || map.isRotating()) return
         const now = Date.now()
         if (now - lastHold < 700) return
         lastHold = now
@@ -248,19 +252,38 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       const beginHold = (event: { lngLat: { lng: number; lat: number }; point: { x: number; y: number }; originalEvent: Event }) => {
         const original = event.originalEvent
         if (original instanceof MouseEvent && original.button !== 0) return
-        if (typeof TouchEvent !== 'undefined' && original instanceof TouchEvent && original.touches.length > 1) return
+        if (typeof TouchEvent !== 'undefined' && original instanceof TouchEvent && original.touches.length > 1) {
+          releaseHold()
+          return
+        }
+        if (map.isZooming() || map.isRotating()) return
         cancelHold()
         const screen = event.point
         const lngLat = event.lngLat
-        holdTimer = window.setTimeout(() => emitHold(lngLat.lng, lngLat.lat, stationAt(screen)), 550)
+        const zoom = map.getZoom()
+        holdTimer = window.setTimeout(() => {
+          if (map.isZooming() || map.isRotating() || Math.abs(map.getZoom() - zoom) > 0.01) return
+          emitHold(lngLat.lng, lngLat.lat, stationAt(screen))
+        }, 550)
       }
 
       map.on('mousedown', beginHold)
       map.on('touchstart', beginHold)
-      map.on('mouseup', cancelHold)
-      map.on('touchend', cancelHold)
-      map.on('touchcancel', cancelHold)
-      map.on('dragstart', cancelHold)
+      map.on('mouseup', releaseHold)
+      map.on('touchend', (event) => {
+        releaseHold()
+        const touches = (event.originalEvent as TouchEvent).touches
+        if (touches && touches.length > 1) releaseHold()
+      })
+      map.on('touchcancel', releaseHold)
+      map.on('touchmove', (event) => {
+        const touches = (event.originalEvent as TouchEvent).touches
+        if (touches && touches.length > 1) releaseHold()
+      })
+      map.on('dragstart', releaseHold)
+      map.on('zoomstart', releaseHold)
+      map.on('rotatestart', releaseHold)
+      map.on('pitchstart', releaseHold)
       map.on('contextmenu', (event) => {
         event.originalEvent.preventDefault()
         cancelHold()
