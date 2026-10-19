@@ -1,3 +1,4 @@
+import { sameStreetName, searchPortals } from './cartociudad'
 import { distanceMeters, fold } from './geo'
 import type { Locale } from './i18n'
 import type { LngLat } from './types'
@@ -7,10 +8,6 @@ const CASTELLO: LngLat = { lng: -0.0376, lat: 39.9864 }
 const AREA = { west: -0.16, south: 39.9, east: 0.1, north: 40.1 }
 const SKIPPED_TYPES = new Set(['country', 'state', 'county'])
 const CATALAN = /[àèòç·]|l·l|d'|Castelló/i
-const ROAD_WORDS = new Set([
-  'carrer', 'calle', 'avinguda', 'avenida', 'avda', 'plaza', 'placa', 'passeig', 'paseo',
-  'ronda', 'carretera', 'travessia', 'travesia', 'camino', 'del', 'dels', 'les', 'los', 'las',
-])
 
 export type AddressHit = {
   id: string
@@ -49,6 +46,7 @@ export async function searchAddresses(
   const settled = await Promise.allSettled([
     fetchPhoton(query, locale, bias, signal, false),
     wanted ? fetchPhoton(query, locale, bias, signal, true) : Promise.resolve([]),
+    wanted ? searchPortals(query, locale, boundSignal(signal, 8000)) : Promise.resolve([]),
   ])
   if (signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
   const failures = settled.filter((item) => item.status === 'rejected')
@@ -74,7 +72,7 @@ async function fetchPhoton(
   url.searchParams.set('limit', houses ? '8' : '6')
   url.searchParams.set('lang', locale === 'en' ? 'en' : 'default')
   if (houses) url.searchParams.set('layer', 'house')
-  const response = await fetch(url, { signal })
+  const response = await fetch(url, { signal: boundSignal(signal, 8000) })
   if (!response.ok) throw new Error(String(response.status))
   const data = (await response.json()) as { features?: PhotonFeature[] }
   const hits: AddressHit[] = []
@@ -94,7 +92,11 @@ function rankHits(hits: AddressHit[], query: string, wanted: string | null): Add
   const scored = [...unique.values()].map((hit) => ({ hit, rank: rankHit(hit, query, wanted) }))
   const buildings = wanted ? scored.filter((item) => item.rank === 0) : []
   const pool = buildings.length > 0 ? buildings : scored.filter((item) => item.rank < 4)
-  pool.sort((a, b) => a.rank - b.rank || Number(Boolean(b.hit.name)) - Number(Boolean(a.hit.name)))
+  pool.sort((a, b) =>
+    a.rank - b.rank ||
+    Number(b.hit.id.startsWith('carto:')) - Number(a.hit.id.startsWith('carto:')) ||
+    Number(Boolean(b.hit.housenumber)) - Number(Boolean(a.hit.housenumber)),
+  )
   const kept: AddressHit[] = []
   for (const item of pool) {
     const hit = item.hit
@@ -113,10 +115,17 @@ function rankHits(hits: AddressHit[], query: string, wanted: string | null): Add
 function rankHit(hit: AddressHit, query: string, wanted: string | null): number {
   const number = normalizeNumber(hit.housenumber ?? '')
   const sameNumber = Boolean(wanted && number === wanted)
-  const sameStreet = streetMatches(query, hit.street) || (!hit.housenumber && streetMatches(query, hit.name))
-  if (sameNumber && sameStreet) return 0
+  const sameBase = Boolean(wanted && baseNumber(number) && baseNumber(number) === baseNumber(wanted))
+  const loose = !wanted
+  const sameStreet =
+    (hit.street ? sameStreetName(query, hit.street, loose) : false) ||
+    (hit.name ? sameStreetName(query, hit.name, loose) : false)
+  if ((sameNumber || sameBase) && sameStreet) return sameNumber ? 0 : 1
   if (!wanted && sameStreet) return 1
-  if (wanted && !number) return 2
+  if (wanted && sameStreet && !number) {
+    const placeName = hit.name && fold(hit.name) !== fold(hit.street ?? '')
+    return placeName ? 3 : 2
+  }
   return 4
 }
 
@@ -133,27 +142,33 @@ export function formatAddress(hit: AddressHit, locale: Locale): { title: string;
 }
 
 function typedNumber(query: string): string | null {
-  const match = query.match(/(?:^|\s)(\d{1,4})(?:\s*([a-zA-Z]{1,4}))?(?=\s|$)/)
+  const withoutPostal = query.replace(/\b\d{5}\b/g, ' ')
+  const match = withoutPostal.match(/(?:^|[^\p{L}\p{N}])(\d{1,4})\s*([a-zA-Z])?(?=[^\p{L}\p{N}]|$)/u)
   if (!match) return null
   return normalizeNumber(`${match[1]}${match[2] ?? ''}`)
+}
+
+function boundSignal(signal: AbortSignal, ms: number): AbortSignal {
+  const controller = new AbortController()
+  const onAbort = () => controller.abort()
+  const timer = setTimeout(onAbort, ms)
+  controller.signal.addEventListener('abort', () => {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', onAbort)
+  })
+  if (signal.aborted) controller.abort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+  return controller.signal
+}
+
+function baseNumber(value: string): string {
+  return value.match(/^\d+/)?.[0] ?? ''
 }
 
 function normalizeNumber(value: string): string {
   const match = value.replace(/\s+/g, '').toUpperCase().match(/^0*(\d+)([A-Z]*)$/)
   if (!match) return ''
   return `${match[1]}${match[2]}`
-}
-
-function streetMatches(query: string, street: string | undefined): boolean {
-  if (!street) return false
-  const wanted = words(query.replace(/\d+/g, ' '))
-  const have = words(street)
-  if (wanted.length === 0 || have.length === 0) return false
-  return have.every((word) => wanted.includes(word)) || wanted.every((word) => have.includes(word))
-}
-
-function words(value: string): string[] {
-  return fold(value).split(/[^a-z0-9]+/).filter((word) => word.length > 2 && !ROAD_WORDS.has(word))
 }
 
 function toHit(feature: PhotonFeature): AddressHit | null {

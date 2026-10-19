@@ -329,16 +329,6 @@ export default function App() {
     }
   }
 
-  function clearSelection() {
-    setSelection(null)
-    setDestination(null)
-    setTrip(null)
-    setRouteError(null)
-    setQuery('')
-    setEditing(null)
-    setLevel('peek')
-  }
-
   function leaveFromHere() {
     if (!selection) return
     setDeparture(selection)
@@ -511,12 +501,6 @@ export default function App() {
       setOrigin(userLocation ? { ...userLocation, label: '', kind: 'location' } : null)
       setLevel('mid')
     }
-  }
-
-  function clearDeparture() {
-    setDeparture(null)
-    setTrip(null)
-    setOrigin(userLocation ? { ...userLocation, label: '', kind: 'location' } : null)
   }
 
   function sheetOffset(which: SheetLevel) {
@@ -741,17 +725,6 @@ export default function App() {
                   {searchingAddresses && editing === 'origin' && (
                     <span className="search-spin" role="status" aria-label={t.findingAddress} />
                   )}
-                  {departure && editing !== 'origin' && (
-                    <button
-                      className="search-clear"
-                      type="button"
-                      onPointerDown={(event) => event.preventDefault()}
-                      onClick={clearDeparture}
-                      aria-label={t.clearFrom}
-                    >
-                      ×
-                    </button>
-                  )}
                   <button
                     className="planner-search"
                     type="button"
@@ -804,17 +777,6 @@ export default function App() {
                   />
                   {searchingAddresses && editing === 'destination' && (
                     <span className="search-spin" role="status" aria-label={t.findingAddress} />
-                  )}
-                  {selection && !editing && (
-                    <button
-                      className="search-clear"
-                      type="button"
-                      onPointerDown={(event) => event.preventDefault()}
-                      onClick={clearSelection}
-                      aria-label={t.cancel}
-                    >
-                      ×
-                    </button>
                   )}
                 </label>
               </div>
