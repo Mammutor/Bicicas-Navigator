@@ -1,7 +1,7 @@
 {
   "id": "./",
   "name": "Bicicas Navigator",
-  "short_name": "biciCas",
+  "short_name": "Bicicas Navigator",
   "description": "Navegador de estaciones Bicicas en Castelló de la Plana.",
   "start_url": "./",
   "scope": "./",
