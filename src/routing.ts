@@ -138,7 +138,15 @@ async function fetchLeg(
       costing,
       costing_options:
         costing === 'bicycle'
-          ? { bicycle: { bicycle_type: 'City', use_roads: 0.15, cycling_speed: 16 } }
+          ? {
+              bicycle: {
+                bicycle_type: 'City',
+                cycling_speed: 16,
+                // Prefer cycleways and separated lanes. Roads stay available
+                // where the bike network does not connect.
+                use_roads: 0,
+              },
+            }
           : { pedestrian: { walking_speed: 5.1 } },
       directions_options: { units: 'kilometers', language },
       shape_format: 'polyline6',

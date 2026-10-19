@@ -59,6 +59,7 @@ export default function App() {
   const [routing, setRouting] = useState(false)
   const [routeError, setRouteError] = useState<string | null>(null)
   const [level, setLevel] = useState<SheetLevel>('peek')
+  const [showBikeLanes, setShowBikeLanes] = useState(false)
   const [editing, setEditing] = useState<'origin' | 'destination' | null>(null)
   const editingRef = useRef(editing)
   editingRef.current = editing
@@ -653,6 +654,7 @@ export default function App() {
         destination={destination}
         userLocation={userLocation}
         legs={trip?.legs ?? []}
+        showBikeLanes={showBikeLanes}
         onSelectStation={selectStation}
         onHoldPlace={(point, stationId) => void holdOnMap(point, stationId)}
       />
@@ -688,13 +690,21 @@ export default function App() {
               <span className="handle" />
             </button>
             <div className="planner">
-              <div className="planner-rail" aria-hidden="true">
-                <span className="planner-circle" />
-                <span className="planner-dots" />
-                <svg className="planner-pin" viewBox="0 0 24 24">
-                  <path d="M12 22s7-7.2 7-12a7 7 0 1 0-14 0c0 4.8 7 12 7 12z" />
-                  <circle cx="12" cy="10" r="2.5" fill="#fff" />
-                </svg>
+              <div className="planner-rail">
+                <span className="planner-circle" aria-hidden="true" />
+                <span className="planner-dots" aria-hidden="true" />
+                <button
+                  className={showBikeLanes ? 'planner-pin active' : 'planner-pin'}
+                  type="button"
+                  aria-pressed={showBikeLanes}
+                  aria-label={t.bikeLanes}
+                  onClick={() => setShowBikeLanes((current) => !current)}
+                >
+                  <svg viewBox="0 0 24 24">
+                    <path d="M12 22s7-7.2 7-12a7 7 0 1 0-14 0c0 4.8 7 12 7 12z" />
+                    <circle cx="12" cy="10" r="2.5" fill="#fff" />
+                  </svg>
+                </button>
               </div>
               <div className="planner-fields">
                 <label className={editing === 'origin' ? 'planner-field focused' : 'planner-field'}>

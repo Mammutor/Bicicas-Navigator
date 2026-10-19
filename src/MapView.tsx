@@ -7,8 +7,12 @@ import {
   type Map as MapLibreMap,
 } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
+import { bikeLanes } from './bikelanes'
 import { dockBorder, stationFill } from './geo'
 import type { LngLat, Place, RouteLeg, Station } from './types'
+
+/** Bordeaux, kept solid enough to read on the light basemap. */
+const BIKE_LANE_COLOR = '#6B1C2C'
 
 const STYLE_URL = 'https://tiles.openfreemap.org/styles/positron'
 const CASTELLON: [number, number] = [-0.039, 39.9865]
@@ -24,6 +28,7 @@ type MapViewProps = {
   destination: Place | null
   userLocation: LngLat | null
   legs: RouteLeg[]
+  showBikeLanes: boolean
   onSelectStation: (id: string) => void
   onHoldPlace: (point: LngLat, stationId: string | null) => void
 }
@@ -55,6 +60,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
     destination,
     userLocation,
     legs,
+    showBikeLanes,
     onSelectStation,
     onHoldPlace,
   },
@@ -67,6 +73,8 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
   const selectedRef = useRef<string | null>(null)
   const handlersRef = useRef({ onSelectStation, onHoldPlace })
   const dataRef = useRef({ stations, selectedId, origin, destination, userLocation, legs })
+  const showBikeLanesRef = useRef(showBikeLanes)
+  showBikeLanesRef.current = showBikeLanes
 
   handlersRef.current = { onSelectStation, onHoldPlace }
   dataRef.current = { stations, selectedId, origin, destination, userLocation, legs }
@@ -112,6 +120,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
 
     map.on('load', () => {
       readyRef.current = true
+      map.addSource('bikelanes', { type: 'geojson', data: bikeLanes })
       map.addSource('routes', { type: 'geojson', data: emptyCollection() })
       map.addSource('places', { type: 'geojson', data: emptyCollection() })
       map.addSource('user', { type: 'geojson', data: emptyCollection() })
@@ -125,6 +134,21 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       })
       map.addImage('station-group', stationGroupIcon(), { pixelRatio: 2 })
 
+      map.addLayer({
+        id: 'bikelanes',
+        type: 'line',
+        source: 'bikelanes',
+        paint: {
+          'line-color': BIKE_LANE_COLOR,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 11, 1.6, 14, 3.5, 17, 6],
+          'line-opacity': 0.92,
+        },
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+          visibility: showBikeLanesRef.current ? 'visible' : 'none',
+        },
+      })
       map.addLayer({
         id: 'route-walk',
         type: 'line',
@@ -337,6 +361,12 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       mapRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !readyRef.current || !map.getLayer('bikelanes')) return
+    map.setLayoutProperty('bikelanes', 'visibility', showBikeLanes ? 'visible' : 'none')
+  }, [showBikeLanes])
 
   useEffect(() => {
     const map = mapRef.current

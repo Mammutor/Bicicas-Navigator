@@ -310,8 +310,20 @@ button, input { font: inherit; }
   width: 18px;
   height: 18px;
   flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
   fill: #e14d4d;
 }
+
+.planner-pin svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.planner-pin.active { fill: #6b1c2c; }
 
 .planner-fields {
   display: grid;
