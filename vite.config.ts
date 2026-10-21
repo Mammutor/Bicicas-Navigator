@@ -19,6 +19,10 @@ function maplibreWorker(): Plugin {
 export default defineConfig({
   plugins: [react(), maplibreWorker()],
   base: './',
+  resolve: {
+    // Stale .js copies sit next to the TypeScript sources. Load the sources.
+    extensions: ['.tsx', '.ts', '.jsx', '.mjs', '.js', '.mts'],
+  },
   server: {
     host: true,
   },

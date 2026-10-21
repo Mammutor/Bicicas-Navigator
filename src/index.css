@@ -163,35 +163,29 @@ button, input { font: inherit; }
   z-index: 3;
   top: calc(12px + env(safe-area-inset-top));
   right: 12px;
+  display: grid;
+  place-items: center;
   width: 48px;
   height: 48px;
+  padding: 0;
   border-radius: 15px;
   background: #2b2a29;
+  color: #fff;
+  line-height: 0;
   box-shadow: 0 8px 20px rgba(43, 42, 41, 0.2);
 }
 
 .locate.busy { opacity: 0.55; }
+.locate.following { background: #63b01f; }
 
-.locate span {
+.locate svg {
   display: block;
-  width: 16px;
-  height: 16px;
-  margin: auto;
-  border: 2px solid #fff;
-  border-radius: 99px;
-  position: relative;
+  width: 22px;
+  height: 22px;
 }
 
-.locate span::after {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 5px;
-  width: 4px;
-  height: 4px;
-  border-radius: 99px;
-  background: #63b01f;
-}
+.locate-dot { fill: #63b01f; }
+.locate.following .locate-dot { fill: #fff; }
 
 .sheet {
   position: absolute;
@@ -567,6 +561,7 @@ button, input { font: inherit; }
 .legs details li { margin: 4px 0; font-size: 13px; }
 
 .footnote { margin: 12px 0 0; }
+.footnote a { color: inherit; }
 
 @media (min-width: 860px) {
   .sheet {

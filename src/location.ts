@@ -1,8 +1,34 @@
 import { Capacitor } from '@capacitor/core'
 import { Geolocation, type PositionOptions } from '@capacitor/geolocation'
+import { distanceMeters } from './geo'
 import type { LngLat } from './types'
 
 export type PositionFix = LngLat & { approximate: boolean }
+
+export type LiveFix = LngLat & {
+  /** Degrees clockwise from north, or null when the device has no direction. */
+  heading: number | null
+  /** True when this fix is movement along the road, not a stationary jitter. */
+  moving: boolean
+}
+
+type DeviceCoords = {
+  longitude: number
+  latitude: number
+  speed?: number | null
+  heading?: number | null
+  course?: number | null
+  trueHeading?: number | null
+}
+
+const WATCH: PositionOptions = {
+  enableHighAccuracy: true,
+  timeout: 20000,
+  maximumAge: 0,
+  // Android otherwise waits on the timeout (many seconds) between fixes.
+  interval: 1000,
+  minimumUpdateInterval: 1000,
+}
 
 const IP_URLS = ['https://ipapi.co/json/', 'https://get.geojs.io/v1/ip/geo.json']
 
@@ -75,26 +101,54 @@ export async function readPosition(): Promise<PositionFix> {
   return { ...point, approximate: true }
 }
 
-export async function watchPosition(onMove: (point: LngLat) => void): Promise<string> {
+export async function watchPosition(onMove: (fix: LiveFix) => void): Promise<string> {
+  const emit = trackFixes(onMove)
   if (!Capacitor.isNativePlatform()) {
     if (!navigator.geolocation) return ''
     const id = navigator.geolocation.watchPosition(
-      (position) => onMove({ lng: position.coords.longitude, lat: position.coords.latitude }),
+      (position) => emit(position.coords),
       () => {},
-      { enableHighAccuracy: false, timeout: 20000, maximumAge: 5000 },
+      WATCH,
     )
     return String(id)
   }
-  return Geolocation.watchPosition(
-    { enableHighAccuracy: false, timeout: 20000, maximumAge: 5000 },
-    (position) => {
-      if (!position) return
-      onMove({
-        lng: position.coords.longitude,
-        lat: position.coords.latitude,
-      })
-    },
-  )
+  return Geolocation.watchPosition(WATCH, (position) => {
+    if (!position) return
+    emit(position.coords)
+  })
+}
+
+export function stillFix(point: LngLat): LiveFix {
+  return { lng: point.lng, lat: point.lat, heading: null, moving: false }
+}
+
+function finiteHeading(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+  return value % 360
+}
+
+function angleBetween(a: number, b: number) {
+  const diff = Math.abs(a - b) % 360
+  return diff > 180 ? 360 - diff : diff
+}
+
+function trackFixes(onMove: (fix: LiveFix) => void) {
+  let last: LiveFix | null = null
+  return (coords: DeviceCoords) => {
+    if (!Number.isFinite(coords.longitude) || !Number.isFinite(coords.latitude)) return
+    const point = { lng: coords.longitude, lat: coords.latitude }
+    const step = last ? distanceMeters(last, point) : Infinity
+    const speed = typeof coords.speed === 'number' && coords.speed >= 0 ? coords.speed : null
+    const moving = speed != null ? speed >= 1.2 : last != null && step >= 3
+    const travel = finiteHeading(coords.course) ?? (moving ? finiteHeading(coords.heading) : null)
+    const compass = finiteHeading(coords.trueHeading) ?? finiteHeading(coords.heading)
+    const heading = moving && travel != null ? travel : compass
+    const turned =
+      heading != null && (last?.heading == null || angleBetween(last.heading, heading) >= 25)
+    if (last && step < 3 && !turned) return
+    last = { ...point, heading, moving }
+    onMove(last)
+  }
 }
 
 export function clearPositionWatch(id: string) {

@@ -1,4 +1,4 @@
-const CACHE = 'bicicas-navigator-v2'
+const CACHE = 'bicicas-navigator-v3'
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

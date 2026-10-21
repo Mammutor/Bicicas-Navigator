@@ -19,6 +19,7 @@ const CASTELLON: [number, number] = [-0.039, 39.9865]
 
 export type MapHandle = {
   flyTo: (point: LngLat, zoom?: number) => void
+  northUp: () => void
 }
 
 type MapViewProps = {
@@ -27,10 +28,16 @@ type MapViewProps = {
   origin: Place | null
   destination: Place | null
   userLocation: LngLat | null
+  userHeading: number | null
+  userMoving: boolean
+  following: boolean
+  followToken: number
+  bottomInset: number
   legs: RouteLeg[]
   showBikeLanes: boolean
   onSelectStation: (id: string) => void
   onHoldPlace: (point: LngLat, stationId: string | null) => void
+  onUserPan: () => void
 }
 
 type FeatureCollection = {
@@ -59,10 +66,16 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
     origin,
     destination,
     userLocation,
+    userHeading,
+    userMoving,
+    following,
+    followToken,
+    bottomInset,
     legs,
     showBikeLanes,
     onSelectStation,
     onHoldPlace,
+    onUserPan,
   },
   ref,
 ) {
@@ -71,13 +84,14 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
   const pendingFly = useRef<{ point: LngLat; zoom: number } | null>(null)
   const readyRef = useRef(false)
   const selectedRef = useRef<string | null>(null)
-  const handlersRef = useRef({ onSelectStation, onHoldPlace })
-  const dataRef = useRef({ stations, selectedId, origin, destination, userLocation, legs })
+  const handlersRef = useRef({ onSelectStation, onHoldPlace, onUserPan })
+  const dataRef = useRef({ stations, selectedId, origin, destination, userLocation, userHeading, legs })
   const showBikeLanesRef = useRef(showBikeLanes)
+  const appliedFollow = useRef(0)
   showBikeLanesRef.current = showBikeLanes
 
-  handlersRef.current = { onSelectStation, onHoldPlace }
-  dataRef.current = { stations, selectedId, origin, destination, userLocation, legs }
+  handlersRef.current = { onSelectStation, onHoldPlace, onUserPan }
+  dataRef.current = { stations, selectedId, origin, destination, userLocation, userHeading, legs }
 
   useImperativeHandle(ref, () => ({
     flyTo(point, zoom = 15) {
@@ -90,8 +104,14 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       map.flyTo({
         center: [point.lng, point.lat],
         zoom: Math.max(map.getZoom(), zoom),
+        bearing: 0,
         essential: true,
       })
+    },
+    northUp() {
+      const map = mapRef.current
+      if (!map || Math.abs(map.getBearing()) < 0.5) return
+      map.resetNorth({ duration: 450 })
     },
   }))
 
@@ -107,6 +127,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       attributionControl: { compact: true },
     })
     map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right')
+    const applyOsmCredit = () => showOsmCredit(map)
+    map.on('styledata', applyOsmCredit)
+    map.on('sourcedata', applyOsmCredit)
     mapRef.current = map
     const queued = pendingFly.current
     if (queued) {
@@ -114,6 +137,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
       map.flyTo({
         center: [queued.point.lng, queued.point.lat],
         zoom: Math.max(map.getZoom(), queued.zoom),
+        bearing: 0,
         essential: true,
       })
     }
@@ -171,6 +195,21 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
           'line-width': 6,
         },
         layout: { 'line-cap': 'round', 'line-join': 'round' },
+      })
+      map.addImage('user-heading', headingIcon(), { pixelRatio: 2 })
+      map.addLayer({
+        id: 'user-heading',
+        type: 'symbol',
+        source: 'user',
+        filter: ['>=', ['get', 'heading'], 0],
+        layout: {
+          'icon-image': 'user-heading',
+          'icon-size': 0.85,
+          'icon-rotate': ['get', 'heading'],
+          'icon-rotation-alignment': 'map',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+        },
       })
       map.addLayer({
         id: 'user-dot',
@@ -246,6 +285,8 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         paint: { 'text-color': '#ffffff' },
       })
 
+      map.moveLayer('user-heading')
+      map.moveLayer('user-dot')
       paintMap(map, dataRef.current, selectedRef)
 
       let holdTimer = 0
@@ -304,7 +345,10 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         const touches = (event.originalEvent as TouchEvent).touches
         if (touches && touches.length > 1) releaseHold()
       })
-      map.on('dragstart', releaseHold)
+      map.on('dragstart', () => {
+        releaseHold()
+        handlersRef.current.onUserPan()
+      })
       map.on('zoomstart', releaseHold)
       map.on('rotatestart', releaseHold)
       map.on('pitchstart', releaseHold)
@@ -408,6 +452,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
         ? { top: 48, bottom: 48, left: 460, right: 48 }
         : { top: 40, bottom: 240, left: 28, right: 28 },
       maxZoom: 16,
+      bearing: 0,
       duration: 800,
     })
   }, [legs])
@@ -430,15 +475,25 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(
     const map = mapRef.current
     if (!map || !readyRef.current) return
     const source = map.getSource('user') as GeoJSONSource | undefined
-    source?.setData(
-      userLocation
-        ? {
-            type: 'FeatureCollection',
-            features: [pointFeature('user', userLocation, 'Tú')],
-          }
-        : emptyCollection(),
-    )
-  }, [userLocation])
+    source?.setData(userCollection(userLocation, userHeading))
+  }, [userLocation, userHeading])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !following || !userLocation) return
+    const engage = appliedFollow.current !== followToken
+    appliedFollow.current = followToken
+    const wide = window.innerWidth >= 860
+    map.easeTo({
+      center: [userLocation.lng, userLocation.lat],
+      offset: wide ? [230, 0] : [0, -Math.round(bottomInset / 2)],
+      zoom: engage ? Math.max(map.getZoom(), 16.5) : undefined,
+      bearing: userMoving && userHeading != null ? userHeading : undefined,
+      duration: engage ? 700 : 900,
+      easing: (t) => t,
+      essential: true,
+    })
+  }, [following, followToken, userLocation, userHeading, userMoving, bottomInset])
 
   return <div ref={containerRef} className="map" />
 })
@@ -451,6 +506,7 @@ function paintMap(
     origin: Place | null
     destination: Place | null
     userLocation: LngLat | null
+    userHeading: number | null
     legs: RouteLeg[]
   },
   selectedRef: { current: string | null },
@@ -484,14 +540,7 @@ function paintMap(
   places?.setData({ type: 'FeatureCollection', features: placeFeatures })
 
   const user = map.getSource('user') as GeoJSONSource | undefined
-  user?.setData(
-    data.userLocation
-      ? {
-          type: 'FeatureCollection',
-          features: [pointFeature('user', data.userLocation, 'Tú')],
-        }
-      : emptyCollection(),
-  )
+  user?.setData(userCollection(data.userLocation, data.userHeading))
 }
 
 function stationsToGeoJSON(stations: Station[]): FeatureCollection {
@@ -545,6 +594,52 @@ function roundedSquare(
   context.closePath()
   context.fillStyle = color
   context.fill()
+}
+
+/** OpenStreetMap requires this exact credit, linking to the licence page. */
+function showOsmCredit(map: MapLibreMap) {
+  const inner = map.getContainer().querySelector('.maplibregl-ctrl-attrib-inner')
+  if (!inner) return
+  for (const link of inner.querySelectorAll('a')) {
+    if (!(link instanceof HTMLAnchorElement) || !link.href.includes('openstreetmap.org/copyright')) continue
+    link.textContent = '© OpenStreetMap contributors'
+    const previous = link.previousSibling
+    if (previous?.nodeType === Node.TEXT_NODE && previous.textContent?.includes('Data from')) {
+      previous.textContent = previous.textContent.replace(/\s*Data from\s*$/, ' ')
+    }
+  }
+}
+
+function userCollection(point: LngLat | null, heading: number | null): FeatureCollection {
+  if (!point) return emptyCollection()
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: { role: 'user', label: 'Tú', heading: heading ?? -1 },
+        geometry: { type: 'Point', coordinates: [point.lng, point.lat] },
+      },
+    ],
+  }
+}
+
+function headingIcon(): ImageData {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) return new ImageData(size, size)
+  context.translate(size / 2, size / 2)
+  context.beginPath()
+  context.moveTo(0, -58)
+  context.lineTo(18, -14)
+  context.lineTo(-18, -14)
+  context.closePath()
+  context.fillStyle = '#2B2A29'
+  context.fill()
+  return context.getImageData(0, 0, size, size)
 }
 
 function pointFeature(

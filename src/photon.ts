@@ -117,28 +117,25 @@ function rankHit(hit: AddressHit, query: string, wanted: string | null): number 
   const sameNumber = Boolean(wanted && number === wanted)
   const sameBase = Boolean(wanted && baseNumber(number) && baseNumber(number) === baseNumber(wanted))
   const loose = !wanted
-  const sameStreet =
-    (hit.street ? sameStreetName(query, hit.street, loose) : false) ||
-    (hit.name ? sameStreetName(query, hit.name, loose) : false)
+  const nameHit = hit.name ? sameStreetName(query, hit.name, loose) : false
+  const streetHit = hit.street ? sameStreetName(query, hit.street, loose) : false
+  const sameStreet = nameHit || streetHit
+  const placeName = Boolean(hit.name && fold(hit.name) !== fold(hit.street ?? ''))
   if ((sameNumber || sameBase) && sameStreet) return sameNumber ? 0 : 1
+  if (!wanted && placeName && nameHit) return 0
   if (!wanted && sameStreet) return 1
-  if (wanted && sameStreet && !number) {
-    const placeName = hit.name && fold(hit.name) !== fold(hit.street ?? '')
-    return placeName ? 3 : 2
-  }
+  if (wanted && sameStreet && !number) return placeName ? 3 : 2
   return 4
 }
 
 export function formatAddress(hit: AddressHit, locale: Locale): { title: string; detail: string } {
   const street = localPlace(hit.street, locale)
   const name = localPlace(hit.name, locale)
-  const numbered = street && hit.housenumber ? `${street} ${hit.housenumber}` : ''
+  const numbered = street && hit.housenumber ? `${street} ${hit.housenumber}` : street
   const place = [localPlace(hit.district, locale), localPlace(hit.city, locale)].filter(Boolean).join(', ')
-  if (numbered) {
-    const extra = name && fold(name) !== fold(numbered) ? name : ''
-    return { title: numbered, detail: [extra, place].filter(Boolean).join(' · ') }
-  }
-  return { title: street || name, detail: place }
+  const distinctName = name && fold(name) !== fold(street) && fold(name) !== fold(numbered) ? name : ''
+  if (distinctName) return { title: distinctName, detail: [numbered, place].filter(Boolean).join(' · ') }
+  return { title: numbered || name, detail: place }
 }
 
 function typedNumber(query: string): string | null {

@@ -5,7 +5,7 @@ import { readFavorites, writeFavorites, type Favorite } from './favorites'
 import { formatDistance, formatDuration, formatUpdated } from './format'
 import { distanceMeters, dockBorder, fold, stationFill } from './geo'
 import { fill, useLocale, valhallaLanguage, type Messages } from './i18n'
-import { clearPositionWatch, readPosition, watchPosition } from './location'
+import { clearPositionWatch, readPosition, stillFix, watchPosition, type LiveFix } from './location'
 import { formatAddress, searchAddresses, type AddressHit } from './photon'
 import { planTrip, TripError } from './routing'
 import { fetchStations } from './stations'
@@ -52,7 +52,19 @@ export default function App() {
   const [lookingUp, setLookingUp] = useState(false)
   const [origin, setOrigin] = useState<Place | null>(null)
   const [destination, setDestination] = useState<Place | null>(null)
-  const [userLocation, setUserLocation] = useState<LngLat | null>(null)
+  const [userLocation, setUserLocation] = useState<LiveFix | null>(null)
+  const [following, setFollowing] = useState(false)
+  const [followToken, setFollowToken] = useState(0)
+  const ride = useRef({
+    pausedFollow: false,
+    following: false,
+    overviewUntil: 0,
+    movingStreak: 0,
+    seenPrecise: false,
+    trip: null as Trip | null,
+    origin: null as Place | null,
+    departure: null as Place | null,
+  })
   const [locating, setLocating] = useState(false)
   const [locationNote, setLocationNote] = useState<'missing' | 'failed' | null>(null)
   const [trip, setTrip] = useState<Trip | null>(null)
@@ -90,6 +102,11 @@ export default function App() {
     }
   }, [])
 
+  ride.current.following = following
+  ride.current.trip = trip
+  ride.current.origin = origin
+  ride.current.departure = departure
+
   useEffect(() => {
     let active = true
     let watchId = ''
@@ -98,13 +115,47 @@ export default function App() {
       try {
         const point = await readPosition()
         if (!active) return
-        setUserLocation(point)
-        setOrigin((current) => current ?? { ...point, label: '', kind: 'location' })
+        setUserLocation(stillFix(point))
+        setOrigin((current) => current ?? { lng: point.lng, lat: point.lat, label: '', kind: 'location' })
         setLocationNote(null)
-        mapRef.current?.flyTo(point, 14)
+        if (point.approximate) {
+          mapRef.current?.flyTo(point, 13)
+        } else if (!ride.current.pausedFollow) {
+          ride.current.seenPrecise = true
+          ride.current.following = true
+          setFollowToken((token) => token + 1)
+          setFollowing(true)
+        }
         watchId = await watchPosition((next) => {
           if (!active) return
           setUserLocation(next)
+          const motion = ride.current
+          motion.movingStreak = next.moving
+            ? motion.movingStreak + 1
+            : Math.max(0, motion.movingStreak - 1)
+          if (
+            !motion.trip &&
+            motion.origin?.kind === 'location' &&
+            (!motion.departure || motion.departure.kind === 'location')
+          ) {
+            setOrigin((current) =>
+              current?.kind === 'location' ? { ...current, lng: next.lng, lat: next.lat } : current,
+            )
+            if (motion.departure?.kind === 'location') {
+              setDeparture((current) =>
+                current?.kind === 'location' ? { ...current, lng: next.lng, lat: next.lat } : current,
+              )
+            }
+          }
+          const firstPrecise = !motion.seenPrecise
+          motion.seenPrecise = true
+          if (motion.pausedFollow || Date.now() < motion.overviewUntil) return
+          if (motion.following) return
+          if (firstPrecise || motion.movingStreak >= 2) {
+            motion.following = true
+            setFollowToken((token) => token + 1)
+            setFollowing(true)
+          }
         })
         if (!active && watchId) await clearPositionWatch(watchId)
       } catch {
@@ -227,7 +278,14 @@ export default function App() {
     }
   }
 
+  function pauseFollow() {
+    ride.current.pausedFollow = true
+    ride.current.following = false
+    setFollowing(false)
+  }
+
   function choosePlace(place: Place, role: 'origin' | 'destination' = 'destination') {
+    pauseFollow()
     setQuery('')
     setEditing(null)
     setTrip(null)
@@ -259,12 +317,12 @@ export default function App() {
 
   async function chooseHere() {
     const role = editingRef.current === 'origin' ? 'origin' : 'destination'
-    let point = userLocation
+    let point: LngLat | null = userLocation
     if (!point) {
       setLocating(true)
       try {
         point = await readPosition()
-        setUserLocation(point)
+        setUserLocation(stillFix(point))
         setLocationNote(null)
       } catch {
         setLocationNote('failed')
@@ -274,7 +332,7 @@ export default function App() {
         setLocating(false)
       }
     }
-    choosePlace({ ...point, label: t.yourLocation, kind: 'location' }, role)
+    choosePlace({ lng: point.lng, lat: point.lat, label: t.yourLocation, kind: 'location' }, role)
   }
 
   function selectStation(id: string) {
@@ -283,6 +341,7 @@ export default function App() {
   }
 
   async function holdOnMap(point: LngLat, stationId: string | null) {
+    pauseFollow()
     const role = editingRef.current === 'origin' ? 'origin' : 'destination'
     if (stationId) {
       const station = stations.find((item) => item.id === stationId)
@@ -395,6 +454,12 @@ export default function App() {
     try {
       const next = await planTrip(spoken(from), spoken(to), stations, valhallaLanguage(locale))
       if (token !== routeToken.current) return
+      ride.current.overviewUntil = Date.now() + 5000
+      ride.current.movingStreak = 0
+      ride.current.following = false
+      ride.current.pausedFollow = false
+      ride.current.trip = next
+      setFollowing(false)
       setTrip(next)
       setLevel('full')
     } catch (error) {
@@ -422,14 +487,13 @@ export default function App() {
     setRouteError(null)
     let from = departure
     if (!from) {
-      let point = userLocation
+      let point: LngLat | null = userLocation
       if (!point) {
         setRouting(true)
         setLocating(true)
         try {
-          const fix = await readPosition()
-          point = fix
-          setUserLocation(fix)
+          point = await readPosition()
+          setUserLocation(stillFix(point))
           setLocationNote(null)
         } catch {
           setLocationNote('failed')
@@ -439,7 +503,7 @@ export default function App() {
           setLocating(false)
         }
       }
-      from = { ...point, label: '', kind: 'location' }
+      from = { lng: point.lng, lat: point.lat, label: '', kind: 'location' }
     }
     setOrigin(from)
     setDestination(selection)
@@ -447,13 +511,22 @@ export default function App() {
   }
 
   async function goToMyLocation() {
+    ride.current.pausedFollow = false
+    ride.current.overviewUntil = 0
+    ride.current.following = true
+    setFollowToken((token) => token + 1)
+    setFollowing(true)
     setLocating(true)
     try {
       const point = await readPosition()
-      setUserLocation(point)
-      setOrigin({ ...point, label: '', kind: 'location' })
+      setUserLocation((current) => ({
+        lng: point.lng,
+        lat: point.lat,
+        heading: current?.heading ?? null,
+        moving: current?.moving ?? false,
+      }))
+      setOrigin({ lng: point.lng, lat: point.lat, label: '', kind: 'location' })
       setLocationNote(null)
-      mapRef.current?.flyTo(point, 15)
     } catch {
       setLocationNote('failed')
       setLevel('full')
@@ -653,20 +726,33 @@ export default function App() {
         origin={origin}
         destination={destination}
         userLocation={userLocation}
+        userHeading={userLocation?.heading ?? null}
+        userMoving={userLocation?.moving ?? false}
+        following={following}
+        followToken={followToken}
+        bottomInset={level === 'mid' ? mid : peek}
         legs={trip?.legs ?? []}
         showBikeLanes={showBikeLanes}
         onSelectStation={selectStation}
         onHoldPlace={(point, stationId) => void holdOnMap(point, stationId)}
+        onUserPan={() => {
+          pauseFollow()
+          mapRef.current?.northUp()
+        }}
       />
 
       <button
-        className={locating ? 'locate busy' : 'locate'}
+        className={locating ? 'locate busy' : following ? 'locate following' : 'locate'}
         type="button"
         onClick={() => void goToMyLocation()}
-        aria-label={t.myLocation}
+        aria-label={following ? t.followingLocation : trip ? t.followRoute : t.myLocation}
+        aria-pressed={following}
         aria-busy={locating}
       >
-        <span aria-hidden="true" />
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" strokeWidth="2" />
+          <circle className="locate-dot" cx="12" cy="12" r="2.6" />
+        </svg>
       </button>
 
       <section
@@ -1132,7 +1218,13 @@ export default function App() {
             </>
           )}
 
-          <p className="footnote">{fill(t.footnote, { count: stations.length })}</p>
+          <p className="footnote">
+            {fill(t.footnoteBefore, { count: stations.length })}
+            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">
+              © OpenStreetMap contributors
+            </a>
+            {t.footnoteAfter}
+          </p>
         </div>
       </section>
     </div>
