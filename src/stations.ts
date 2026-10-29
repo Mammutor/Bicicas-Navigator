@@ -1,8 +1,8 @@
 import { splitStationName } from './format'
 import type { Station } from './types'
 
-/** Feed loaded by the public map at https://dev.bicicas.es/mapa */
-export const STATIONS_URL = 'https://ws2.bicicas.es/bench_status_map'
+/** Feed loaded by the public map at https://www.bicicas.es/mapa */
+export const STATIONS_URL = 'https://gateway.bicicas.es/api/bench_status_map'
 
 type Anchor = {
   number?: number
